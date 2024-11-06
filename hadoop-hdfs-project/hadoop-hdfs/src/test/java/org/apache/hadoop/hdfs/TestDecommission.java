@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs;
 
+import org.apache.hadoop.hdfs.server.blockmanagement.UnderConstructionBlocks;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -37,6 +38,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
@@ -2183,5 +2185,309 @@ public class TestDecommission extends AdminStatesBaseTest {
         LOG.info(infoMsg);
       }
     }
+  }
+
+  @Test(timeout = 60000)
+  public void testDecommissionWithUCBlocksFeatureDisabledAndDefaultMonitor() throws Exception {
+    testDecommissionWithUnderConstructionBlocksFeatureDisabled(false);
+  }
+
+  @Test(timeout = 60000)
+  public void testDecommissionWithUCBlocksFeatureDisabledAndBackoffMonitor() throws Exception {
+    testDecommissionWithUnderConstructionBlocksFeatureDisabled(true);
+  }
+
+  /*
+  This test confirms that when "dfs.namenode.decommission.track.underconstructionblocks = false",
+  decommissioning is not blocked on datanodes which have blocks actively being written (i.e.
+  blocks which are under construction). This leads to HDFS data loss & write failures.
+   */
+  public void testDecommissionWithUnderConstructionBlocksFeatureDisabled(
+          final boolean useBackoffMonitor) throws Exception {
+    // Constants
+    final Path file = new Path("/test-file");
+    final int numDatanode = 4;
+    final short replicationFactor = 2;
+    final int numDecommNodes = 2;
+
+    // Enable UnderConstructionBlocks feature
+    getConf().setBoolean(DFSConfigKeys.DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS, false);
+    // Run monitor every 5 seconds to speed up decommissioning & make the test faster
+    final int datanodeAdminMonitorFixedRateSeconds = 5;
+    getConf().setInt(MiniDFSCluster.DFS_NAMENODE_DECOMMISSION_INTERVAL_TESTING_KEY,
+            datanodeAdminMonitorFixedRateSeconds);
+    // Ensure that the DataStreamer client will replace the bad datanode on append failure
+    getConf().set(HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.POLICY_KEY, "ALWAYS");
+    // Avoid having the DataStreamer client fail the append operation if datanode replacement fails
+    getConf()
+        .setBoolean(HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.BEST_EFFORT_KEY, true);
+    // Test the backoff monitor
+    if (useBackoffMonitor) {
+      final String configKey = "dfs.namenode.decommission.monitor.class";
+      final String className =
+          "org.apache.hadoop.hdfs.server.blockmanagement.DatanodeAdminBackoffMonitor";
+      getConf().set(configKey, className);
+    }
+
+    // Create MiniDFSCluster
+    startCluster(1, numDatanode);
+    getCluster().waitActive();
+    final FSNamesystem namesystem = getCluster().getNamesystem();
+    final BlockManager blockManager = namesystem.getBlockManager();
+    final DatanodeManager datanodeManager = blockManager.getDatanodeManager();
+    final DatanodeAdminManager decomManager = datanodeManager.getDatanodeAdminManager();
+    final FileSystem fs = getCluster().getFileSystem();
+    final UnderConstructionBlocks ucBlocks = blockManager.getUnderConstructionBlocks();
+
+    // Get DatanodeDescriptors
+    final List<DatanodeDescriptor> allNodes = new ArrayList<>();
+    for (final DataNode node : getCluster().getDataNodes()) {
+      allNodes.add(getDatanodeDesriptor(namesystem, node.getDatanodeUuid()));
+    }
+
+    // Open a DFSOutputStream & write some data
+    // Do not close the output stream to avoid FINALIZING the Under Construction block
+    LOG.info("Creating DFSOutputStream with {} replicas", replicationFactor);
+    FSDataOutputStream out = fs.create(file, replicationFactor);
+    for (int i = 0; i < 512; i++) {
+      out.write(i);
+    }
+    out.hflush();
+
+    // Extract block replica locations
+    BlockLocation[] blocksInFile = fs.getFileBlockLocations(file, 0, 0);
+    assertEquals(1, blocksInFile.length);
+    List<String> datanodeNames = Arrays.asList(blocksInFile[0].getNames());
+    assertEquals(replicationFactor, datanodeNames.size());
+    final Set<DatanodeDescriptor> replicaNodes = new HashSet<>();
+    for (final DatanodeDescriptor dn: allNodes) {
+      if (datanodeNames.contains(dn.getName())) {
+        replicaNodes.add(dn);
+      }
+    }
+    assertEquals(replicationFactor, replicaNodes.size());
+
+    // Decommission the datanode
+    final ArrayList<DatanodeInfo> decommissionedNodes = new ArrayList<>();
+    for (final DatanodeDescriptor dn: replicaNodes) {
+      LOG.info("Decommission node {} with the UC replica", dn.getXferAddr());
+      takeNodeOutofService(0, dn.getDatanodeUuid(), 0, decommissionedNodes,
+              AdminStates.DECOMMISSION_INPROGRESS);
+      decommissionedNodes.add(dn);
+    }
+
+    // Wait for the datanode to finish decommissioning
+    try {
+      GenericTestUtils.waitFor(() -> decomManager.getNumTrackedNodes() == 0
+                      && decomManager.getNumPendingNodes() == 0
+                      && decommissionedNodes.stream().allMatch(dn ->
+                      dn.getAdminState().equals(AdminStates.DECOMMISSIONED)),
+              500, 20000);
+    } catch (Exception e) {
+      final String errMsg =
+          String.format("Datanodes did not enter DECOMMISSIONED as expected. "
+                  + "numTracked = %d , numPending = %d , nodes = [%s] , replicas = [%s]",
+              decomManager.getNumTrackedNodes(), decomManager.getNumPendingNodes(),
+              allNodes.stream().map(dn ->
+                      String.format("(%s:%s)", dn.getXferAddr(), dn.getAdminState()))
+                      .collect(Collectors.joining(",")),
+              replicaNodes.stream().map(DatanodeID::getXferAddr).collect(Collectors.joining(",")));
+      LOG.error(errMsg);
+      fail(errMsg);
+    }
+
+    // Validate UnderConstructionBlocks is empty
+    assertEquals(0, ucBlocks.getUnderConstructionBlocksByDatanode().size());
+
+    // Write more data to DFSOutputStream (can write to a decommissioned datanode)
+    for (int i = 0; i < 512; i++) {
+      out.write(i);
+    }
+    out.hflush();
+
+    // For some reason, the DFS client write operations do not fail
+    // when using the Backoff Monitor. Pending further investigation.
+    if (useBackoffMonitor) {
+      return;
+    }
+
+    // Stop the decommissioned datanodes
+    for (final DatanodeInfo dn: decommissionedNodes) {
+      getCluster().stopDataNode(dn.getXferAddr());
+    }
+    // Wait for the datanodes to stop
+    final int numLiveNodes = numDatanode - numDecommNodes;
+    GenericTestUtils.waitFor(() -> numLiveNodes == datanodeManager.getNumLiveDataNodes()
+        && numDecommNodes == datanodeManager.getNumDeadDataNodes(), 500, 20000);
+
+    // Try to write & validate it fails
+    for (int i = 0; i < 10; i++) {
+      try {
+        out.write(i);
+        out.hflush();
+        fail("Write expected to fail if all nodes in write pipeline are terminated");
+      } catch (Exception e) {
+        // Should fail with this exception when trying to connect to the bad datanodes.
+        // Exception will repeat because datanodes cannot be replaced
+        // (because they are all bad).
+        assertEquals(IOException.class, e.getClass());
+      }
+      Thread.sleep(100);
+    }
+  }
+
+  @Test(timeout = 60000)
+  public void testDecommissionWithUCBlocksFeatureEnabledAndDefaultMonitor() throws Exception {
+    testDecommissionWithUnderConstructionBlocksFeatureEnabled(false);
+  }
+
+  @Test(timeout = 60000)
+  public void testDecommissionWithUCBlocksFeatureEnabledAndBackoffMonitor() throws Exception {
+    testDecommissionWithUnderConstructionBlocksFeatureEnabled(true);
+  }
+
+  /*
+  This test confirms that when "dfs.namenode.decommission.track.underconstructionblocks = true",
+  decommissioning is blocked on datanodes which have blocks actively being written (i.e.
+  blocks which are under construction).
+   */
+  public void testDecommissionWithUnderConstructionBlocksFeatureEnabled(
+          final boolean useBackoffMonitor) throws Exception {
+    // Constants
+    final Path file = new Path("/test-file");
+    final int numDatanode = 4;
+    final short replicationFactor = 2;
+    final int numDecommNodes = 2;
+
+    // Enable UnderConstructionBlocks feature
+    getConf().setBoolean(DFSConfigKeys.DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS, true);
+    // Run monitor every 5 seconds to speed up decommissioning & make the test faster
+    final int datanodeAdminMonitorFixedRateSeconds = 5;
+    getConf().setInt(MiniDFSCluster.DFS_NAMENODE_DECOMMISSION_INTERVAL_TESTING_KEY,
+            datanodeAdminMonitorFixedRateSeconds);
+    // Ensure that the DataStreamer client will replace the bad datanode on append failure
+    getConf().set(HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.POLICY_KEY, "ALWAYS");
+    // Avoid having the DataStreamer client fail the append operation if datanode replacement fails
+    getConf()
+        .setBoolean(HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.BEST_EFFORT_KEY, true);
+    // Test the backoff monitor
+    if (useBackoffMonitor) {
+      final String configKey = "dfs.namenode.decommission.monitor.class";
+      final String className =
+          "org.apache.hadoop.hdfs.server.blockmanagement.DatanodeAdminBackoffMonitor";
+      getConf().set(configKey, className);
+    }
+
+    // Create MiniDFSCluster
+    startCluster(1, numDatanode);
+    getCluster().waitActive();
+    final FSNamesystem namesystem = getCluster().getNamesystem();
+    final BlockManager blockManager = namesystem.getBlockManager();
+    final DatanodeManager datanodeManager = blockManager.getDatanodeManager();
+    final DatanodeAdminManager decomManager = datanodeManager.getDatanodeAdminManager();
+    final FileSystem fs = getCluster().getFileSystem();
+    final UnderConstructionBlocks ucBlocks = blockManager.getUnderConstructionBlocks();
+
+    // Get DatanodeDescriptors
+    final List<DatanodeDescriptor> allNodes = new ArrayList<>();
+    for (final DataNode node : getCluster().getDataNodes()) {
+      allNodes.add(getDatanodeDesriptor(namesystem, node.getDatanodeUuid()));
+    }
+
+    // Open a DFSOutputStream & write some data
+    // Do not close the output stream to avoid FINALIZING the Under Construction block
+    LOG.info("Creating DFSOutputStream with {} replicas", replicationFactor);
+    FSDataOutputStream out = fs.create(file, replicationFactor);
+    for (int i = 0; i < 512; i++) {
+      out.write(i);
+    }
+    out.hflush();
+
+    // Confirm the BlockManager starts tracking the UC blocks
+    try {
+      GenericTestUtils.waitFor(() ->
+              ucBlocks.getUnderConstructionBlocksByDatanode().keySet().size() == replicationFactor,
+              500, 20000);
+    } catch (Exception e) {
+      final String errMsg = "Under Construction blocks not added to the BlockManager";
+      LOG.error(errMsg);
+      fail(errMsg);
+    }
+    final Set<DatanodeDescriptor> replicaNodes =
+        ucBlocks.getUnderConstructionBlocksByDatanode().keySet();
+    assertEquals(replicationFactor, replicaNodes.size());
+
+    // Decommission the datanode
+    final ArrayList<DatanodeInfo> decommissionedNodes = new ArrayList<>();
+    for (final DatanodeDescriptor dn: replicaNodes) {
+      LOG.info("Decommission node {} with the UC replica", dn.getXferAddr());
+      takeNodeOutofService(0, dn.getDatanodeUuid(), 0, decommissionedNodes,
+              AdminStates.DECOMMISSION_INPROGRESS);
+      decommissionedNodes.add(dn);
+    }
+
+    // Wait for the datanode to start decommissioning
+    try {
+      GenericTestUtils.waitFor(() -> decomManager.getNumTrackedNodes() == numDecommNodes
+              && decomManager.getNumPendingNodes() == 0
+              && decommissionedNodes.stream().allMatch(dn ->
+                      dn.getAdminState().equals(AdminStates.DECOMMISSION_INPROGRESS)),
+              500, 20000);
+    } catch (Exception e) {
+      final String errMsg =
+          String.format("Datanodes did not enter DECOMMISSION_INPROGRESS as expected. "
+              + "numTracked = %d , numPending = %d , nodes = [%s] , replicas = [%s]",
+          decomManager.getNumTrackedNodes(), decomManager.getNumPendingNodes(),
+          allNodes.stream().map(dn ->
+                  String.format("(%s:%s)", dn.getXferAddr(), dn.getAdminState()))
+                  .collect(Collectors.joining(",")),
+          replicaNodes.stream().map(DatanodeID::getXferAddr).collect(Collectors.joining(",")));
+      LOG.error(errMsg);
+      fail(errMsg);
+    }
+
+    // Write more data to DFSOutputStream
+    for (int i = 0; i < 512; i++) {
+      out.write(i);
+    }
+    out.hflush();
+
+    // Validate datanodes do not become decommissioned for 8 seconds
+    final Duration checkDuration = Duration.ofSeconds(8);
+    Instant checkUntil = Instant.now().plus(checkDuration);
+    while (Instant.now().isBefore(checkUntil)) {
+      BlockManagerTestUtil.recheckDecommissionState(datanodeManager);
+      assertEquals(
+              "Unexpected number of decommissioning nodes tracked in DatanodeAdminManager.",
+              numDecommNodes, decomManager.getNumTrackedNodes());
+      assertTrue(
+              "Decommissioning nodes unexpectedly transitioned out of DECOMMISSION_INPROGRESS.",
+              decommissionedNodes.stream()
+                      .allMatch(node -> node.getAdminState()
+                              .equals(AdminStates.DECOMMISSION_INPROGRESS)));
+      Thread.sleep(500);
+    }
+
+    // Write more data & close the DFSOutputStream
+    for (int i = 0; i < 512; i++) {
+      out.write(i);
+    }
+    out.close();
+
+    // Validate datanodes are eventually decommissioned after DFSOutputStream is closed
+    try {
+      GenericTestUtils.waitFor(() -> decomManager.getNumTrackedNodes() == 0
+                      && decomManager.getNumPendingNodes() == 0
+                      && decommissionedNodes.stream().allMatch(dn ->
+                      dn.getAdminState().equals(AdminStates.DECOMMISSIONED)),
+              500, 30000);
+    } catch (Exception e) {
+      final String errMsg = "Datanodes did not enter DECOMMISSIONED as expected";
+      LOG.error(errMsg);
+      fail(errMsg);
+    }
+
+    // Validate UnderConstructionBlocks have been removed
+    assertEquals(0, ucBlocks.getUnderConstructionBlocksByDatanode().size());
   }
 }

@@ -1744,6 +1744,27 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
   public static final boolean
       DFS_DATANODE_LOCKMANAGER_TRACE_DEFAULT = false;
 
+  /**
+   * A datanode should only enter decommissioned state if all blocks
+   * on the datanode are sufficiently replicated to other live datanodes.
+   *
+   * When this setting is disabled, the Namenode does not consider
+   * Under Construction blocks in determining if a datanode can be
+   * decommissioned; this results in scenarios where datanodes enter
+   * decommissioned state before their blocks are sufficiently replicated
+   * to other live datanodes. This can lead to HDFS write failures & data loss,
+   * if all the datanodes in the block write pipeline are decommissioned
+   * & terminated at around the same time.
+   *
+   * Enable the following setting to have the Namenode track & consider
+   * Under Construction blocks when identifying if a datanode can be
+   * decommissioned.
+   */
+  public static final String DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS =
+          "dfs.namenode.decommission.track.underconstructionblocks";
+  public static final boolean DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS_DEFAULT =
+          false;
+
   // dfs.client.retry confs are moved to HdfsClientConfigKeys.Retry
   @Deprecated
   public static final String  DFS_CLIENT_RETRY_POLICY_ENABLED_KEY

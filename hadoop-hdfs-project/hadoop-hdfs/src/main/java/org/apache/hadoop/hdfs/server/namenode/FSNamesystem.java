@@ -4104,12 +4104,18 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
             if (dsInfos[i] != null) {
               if(copyTruncate) {
                 dsInfos[i].addBlock(truncatedBlock, truncatedBlock);
+                // Once the block is added to StorageInfos, it no longer needs to be
+                // tracked in UnderConstructionBlocks data structure.
+                blockManager.removeUcBlock(dsInfos[i].getDatanodeDescriptor(), truncatedBlock);
               } else {
                 Block bi = new Block(storedBlock);
                 if (storedBlock.isStriped()) {
                   bi.setBlockId(bi.getBlockId() + i);
                 }
                 dsInfos[i].addBlock(storedBlock, bi);
+                // Once the block is added to StorageInfos, it no longer needs to be
+                // tracked in UnderConstructionBlocks data structure.
+                blockManager.removeUcBlock(dsInfos[i].getDatanodeDescriptor(), bi);
               }
             }
           }

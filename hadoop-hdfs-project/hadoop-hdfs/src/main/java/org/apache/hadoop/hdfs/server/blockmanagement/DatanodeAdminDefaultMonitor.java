@@ -17,6 +17,8 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import org.apache.hadoop.classification.VisibleForTesting;
+import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.util.Preconditions;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
@@ -27,16 +29,17 @@ import org.apache.hadoop.hdfs.util.CyclicIteration;
 import org.apache.hadoop.hdfs.util.LightWeightHashSet;
 import org.apache.hadoop.hdfs.util.LightWeightLinkedSet;
 import org.apache.hadoop.util.ChunkedArrayList;
-import org.apache.hadoop.classification.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.AbstractList;
+import java.util.Collections;
 import java.util.TreeMap;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
 import java.util.Iterator;
+import java.util.stream.Collectors;
 
 /**
  * Checks to see if datanodes have finished DECOMMISSION_INPROGRESS or
@@ -177,6 +180,7 @@ public class DatanodeAdminDefaultMonitor extends DatanodeAdminMonitorBase
           "decommissioning/maintenance checks.");
       return;
     }
+    blockManager.logWarningForLongUnderConstructionBlocks();
     // Reset the checked count at beginning of each iteration
     numBlocksChecked = 0;
     numBlocksCheckedPerLock = 0;
@@ -235,6 +239,10 @@ public class DatanodeAdminDefaultMonitor extends DatanodeAdminMonitorBase
     final List<DatanodeDescriptor> unhealthyDns = new ArrayList<>();
     boolean isValidState = true;
 
+    // Prepare a lookup map to determine if a datanode
+    // has any blocks Under Construction.
+    final Map<DatanodeDescriptor, List<Block>> ucBlocksByDatanode =
+        blockManager.countUnderConstructionBlocksByDatanode();
     while (it.hasNext() && !exceededNumBlocksPerCheck() && namesystem
         .isRunning()) {
       numNodesChecked++;
@@ -290,22 +298,33 @@ public class DatanodeAdminDefaultMonitor extends DatanodeAdminMonitorBase
           // If the full scan is clean AND the node liveness is okay,
           // we can finally mark as DECOMMISSIONED or IN_MAINTENANCE.
           if (blocks.size() == 0 && isHealthy) {
-            if (dn.isDecommissionInProgress()) {
-              dnAdmin.setDecommissioned(dn);
-              toRemove.add(dn);
-            } else if (dn.isEnteringMaintenance()) {
-              // IN_MAINTENANCE node remains in the outOfServiceNodeBlocks to
-              // to track maintenance expiration.
-              dnAdmin.setInMaintenance(dn);
+            // Perform a final check to see if the datanode has any blocks in
+            // Under Construction state (blocks which are open for write)
+            if (ucBlocksByDatanode.containsKey(dn)) {
+              final List<Block> ucBlocks =
+                  ucBlocksByDatanode.getOrDefault(dn, Collections.emptyList());
+              final String ucBlocksString =
+                  ucBlocks.stream().map(Object::toString).collect(Collectors.joining(","));
+              LOG.info("Cannot decommission datanode {} with {} UC blocks: [{}]",
+                  dn, ucBlocks.size(), ucBlocksString);
             } else {
-              isValidState  = false;
-              Preconditions.checkState(false,
-                  "Node %s is in an invalid state! "
-                      + "Invalid state: %s %s blocks are on this dn.",
-                  dn, dn.getAdminState(), blocks.size());
+              if (dn.isDecommissionInProgress()) {
+                dnAdmin.setDecommissioned(dn);
+                toRemove.add(dn);
+              } else if (dn.isEnteringMaintenance()) {
+                // IN_MAINTENANCE node remains in the outOfServiceNodeBlocks to
+                // to track maintenance expiration.
+                dnAdmin.setInMaintenance(dn);
+              } else {
+                isValidState  = false;
+                Preconditions.checkState(false,
+                        "Node %s is in an invalid state! "
+                                + "Invalid state: %s %s blocks are on this dn.",
+                        dn, dn.getAdminState(), blocks.size());
+              }
+              LOG.debug("Node {} is sufficiently replicated and healthy, "
+                      + "marked as {}.", dn, dn.getAdminState());
             }
-            LOG.debug("Node {} is sufficiently replicated and healthy, "
-                + "marked as {}.", dn, dn.getAdminState());
           } else {
             LOG.info("Node {} {} healthy."
                     + " It needs to replicate {} more blocks."

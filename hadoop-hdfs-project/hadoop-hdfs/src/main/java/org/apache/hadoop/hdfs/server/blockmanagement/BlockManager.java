@@ -190,6 +190,7 @@ public class BlockManager implements BlockStatsMXBean {
 
   private final PendingDataNodeMessages pendingDNMessages =
     new PendingDataNodeMessages();
+  private final UnderConstructionBlocks ucBlocks;
 
   private volatile long pendingReconstructionBlocksCount = 0L;
   private volatile long corruptReplicaBlocksCount = 0L;
@@ -205,6 +206,20 @@ public class BlockManager implements BlockStatsMXBean {
   private final long startupDelayBlockDeletionInMs;
   private final BlockReportLeaseManager blockReportLeaseManager;
   private ObjectName mxBeanName;
+
+  /**
+   * When an HDFS client notifies the Namenode a block is closed/committed,
+   * the block is added to the StorageInfos and therefore needs to be
+   * removed from UnderConstructionBlocks.
+   */
+  public void removeUcBlock(DatanodeDescriptor dn, Block block) {
+    ucBlocks.removeUcBlock(dn, block);
+  }
+
+  @VisibleForTesting
+  public UnderConstructionBlocks getUnderConstructionBlocks() {
+    return ucBlocks;
+  }
 
   /** Used by metrics */
   public long getPendingReconstructionBlocksCount() {
@@ -608,6 +623,9 @@ public class BlockManager implements BlockStatsMXBean {
     setExcessRedundancyTimeoutCheckLimit(conf.getLong(
         DFS_NAMENODE_EXCESS_REDUNDANCY_TIMEOUT_CHECK_LIMIT,
         DFS_NAMENODE_EXCESS_REDUNDANCY_TIMEOUT_CHECK_LIMIT_DEFAULT));
+
+    // Create in-memory data structure to track Under Construction blocks.
+    this.ucBlocks = new UnderConstructionBlocks(conf);
 
     printInitialConfigs();
   }
@@ -1817,9 +1835,29 @@ public class BlockManager implements BlockStatsMXBean {
     }
     // Remove all pending DN messages referencing this DN.
     pendingDNMessages.removeAllMessagesForDatanode(node);
+    // Remove all Under Construction blocks on this datanode
+    ucBlocks.removeAllUcBlocksForDatanode(node);
 
     node.resetBlocks();
     invalidateBlocks.remove(node);
+  }
+
+  /** Count how many Under Construction blocks there are per datanode. */
+  Map<DatanodeDescriptor, List<Block>> countUnderConstructionBlocksByDatanode() {
+    final Map<DatanodeDescriptor, List<Block>> result =
+        ucBlocks.getUnderConstructionBlocksByDatanode();
+    if (LOG.isDebugEnabled()) {
+      String ucBlockCounts = result.entrySet().stream()
+          .map(e -> String.format("%s=%d", e.getKey(), e.getValue().size()))
+          .collect(Collectors.joining(",", "{", "}"));
+      LOG.debug("Under Construction block counts: [{}]", ucBlockCounts);
+    }
+    return result;
+  }
+
+  /** Log warning for each block open for longer than fixed time threshold. */
+  void logWarningForLongUnderConstructionBlocks() {
+    ucBlocks.logWarningForLongUnderConstructionBlocks();
   }
 
   /** Remove the blocks associated to the given DatanodeStorageInfo. */
@@ -1954,6 +1992,9 @@ public class BlockManager implements BlockStatsMXBean {
     // Add replica to the data-node if it is not already there
     if (storageInfo != null) {
       storageInfo.addBlock(b.getStored(), b.getCorrupted());
+      // Once the block is added to StorageInfos, it no longer needs to be
+      // tracked in UnderConstructionBlocks data structure.
+      ucBlocks.removeUcBlock(storageInfo.getDatanodeDescriptor(), b.getCorrupted());
     }
 
     // Add this replica to corruptReplicas Map. For striped blocks, we always
@@ -3709,6 +3750,10 @@ public class BlockManager implements BlockStatsMXBean {
         block.findStorageInfo(storageInfo) < 0) || corruptReplicas
         .isReplicaCorrupt(block, storageInfo.getDatanodeDescriptor())) {
       addStoredBlock(block, ucBlock.reportedBlock, storageInfo, null, true);
+    } else {
+      // Non-finalized Under Construction blocks are not added to the StorageInfos.
+      // They are instead tracked via UnderConstructionBlocks data structure.
+      ucBlocks.addUcBlock(storageInfo.getDatanodeDescriptor(), ucBlock.reportedBlock);
     }
   } 
 
@@ -3735,6 +3780,9 @@ public class BlockManager implements BlockStatsMXBean {
 
     // just add it
     AddBlockResult result = storageInfo.addBlock(storedBlock, reported);
+    // Once the block is added to StorageInfos, it no longer needs to be
+    // tracked in UnderConstructionBlocks data structure.
+    ucBlocks.removeUcBlock(storageInfo.getDatanodeDescriptor(), reported);
 
     // Now check for completion of blocks and safe block count
     int numCurrentReplica = countLiveNodes(storedBlock);
@@ -3781,6 +3829,9 @@ public class BlockManager implements BlockStatsMXBean {
 
     // add block to the datanode
     AddBlockResult result = storageInfo.addBlock(storedBlock, reportedBlock);
+    // Once the block is added to StorageInfos, it no longer needs to be
+    // tracked in UnderConstructionBlocks data structure.
+    ucBlocks.removeUcBlock(storageInfo.getDatanodeDescriptor(), reportedBlock);
 
     int curReplicaDelta;
     if (result == AddBlockResult.ADDED) {
@@ -4430,6 +4481,9 @@ public class BlockManager implements BlockStatsMXBean {
     blockLog.debug("BLOCK* removeStoredBlock: {} from {}", storedBlock, node);
     assert (namesystem.hasWriteLock());
     {
+      // Once the block is removed from the datanode, it no longer needs to be
+      // tracked in UnderConstructionBlocks data structure.
+      ucBlocks.removeUcBlock(node, storedBlock);
       if (storedBlock == null || !blocksMap.removeNode(storedBlock, node)) {
         blockLog.debug("BLOCK* removeStoredBlock: {} has already been removed from node {}",
             storedBlock, node);

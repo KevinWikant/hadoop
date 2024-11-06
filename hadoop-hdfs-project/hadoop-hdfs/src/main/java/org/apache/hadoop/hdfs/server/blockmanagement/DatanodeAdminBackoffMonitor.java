@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
+import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.thirdparty.com.google.common.collect.Iterables;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.server.namenode.INode;
@@ -27,6 +28,8 @@ import org.apache.hadoop.hdfs.util.LightWeightLinkedSet;
 import org.apache.hadoop.classification.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.Map;
@@ -166,6 +169,7 @@ public class DatanodeAdminBackoffMonitor extends DatanodeAdminMonitorBase
           "decommissioning/maintenance checks.");
       return;
     }
+    blockManager.logWarningForLongUnderConstructionBlocks();
     // Reset the checked count at beginning of each iteration
     numBlocksChecked = 0;
     // Check decommission or maintenance progress.
@@ -362,38 +366,53 @@ public class DatanodeAdminBackoffMonitor extends DatanodeAdminMonitorBase
     }
     namesystem.writeLock();
     try {
+      // Prepare a lookup map to determine if a datanode
+      // has any blocks Under Construction.
+      final Map<DatanodeDescriptor, List<Block>> ucBlocksByDatanode =
+          blockManager.countUnderConstructionBlocksByDatanode();
       for (DatanodeDescriptor dn : toRemove) {
         final boolean isHealthy =
             blockManager.isNodeHealthyForDecommissionOrMaintenance(dn);
         if (isHealthy) {
-          if (dn.isDecommissionInProgress()) {
-            dnAdmin.setDecommissioned(dn);
-            outOfServiceNodeBlocks.remove(dn);
-            pendingRep.remove(dn);
-          } else if (dn.isEnteringMaintenance()) {
-            // IN_MAINTENANCE node remains in the outOfServiceNodeBlocks to
-            // to track maintenance expiration.
-            dnAdmin.setInMaintenance(dn);
-            pendingRep.remove(dn);
-          } else if (dn.isInService()) {
-            // Decom / maint was cancelled and the node is yet to be processed
-            // from cancelledNodes
-            LOG.info("Node {} completed decommission and maintenance " +
-                "but has been moved back to in service", dn);
-            pendingRep.remove(dn);
-            outOfServiceNodeBlocks.remove(dn);
-            continue;
+          // Perform a final check to see if the datanode has any blocks in
+          // Under Construction state (blocks which are open for write)
+          if (ucBlocksByDatanode.containsKey(dn)) {
+            final List<Block> ucBlocks =
+                ucBlocksByDatanode.getOrDefault(dn, Collections.emptyList());
+            final String ucBlocksString =
+                    ucBlocks.stream().map(Object::toString).collect(Collectors.joining(","));
+            LOG.info("Cannot decommission datanode {} with {} UC blocks: [{}]",
+                dn, ucBlocks.size(), ucBlocksString);
           } else {
-            // Should not happen
-            LOG.error("Node {} is in an unexpected state {} and has been "+
-                    "removed from tracking for decommission or maintenance",
-                dn, dn.getAdminState());
-            pendingRep.remove(dn);
-            outOfServiceNodeBlocks.remove(dn);
-            continue;
+            if (dn.isDecommissionInProgress()) {
+              dnAdmin.setDecommissioned(dn);
+              outOfServiceNodeBlocks.remove(dn);
+              pendingRep.remove(dn);
+            } else if (dn.isEnteringMaintenance()) {
+              // IN_MAINTENANCE node remains in the outOfServiceNodeBlocks to
+              // to track maintenance expiration.
+              dnAdmin.setInMaintenance(dn);
+              pendingRep.remove(dn);
+            } else if (dn.isInService()) {
+              // Decom / maint was cancelled and the node is yet to be processed
+              // from cancelledNodes
+              LOG.info("Node {} completed decommission and maintenance " +
+                      "but has been moved back to in service", dn);
+              pendingRep.remove(dn);
+              outOfServiceNodeBlocks.remove(dn);
+              continue;
+            } else {
+              // Should not happen
+              LOG.error("Node {} is in an unexpected state {} and has been "+
+                              "removed from tracking for decommission or maintenance",
+                      dn, dn.getAdminState());
+              pendingRep.remove(dn);
+              outOfServiceNodeBlocks.remove(dn);
+              continue;
+            }
+            LOG.info("Node {} is sufficiently replicated and healthy, "
+                    + "marked as {}.", dn, dn.getAdminState());
           }
-          LOG.info("Node {} is sufficiently replicated and healthy, "
-              + "marked as {}.", dn, dn.getAdminState());
         } else {
           LOG.info("Node {} isn't healthy."
                   + " It needs to replicate {} more blocks."
