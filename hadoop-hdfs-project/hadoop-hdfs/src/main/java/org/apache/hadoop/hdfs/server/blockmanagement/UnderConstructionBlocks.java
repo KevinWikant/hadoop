@@ -37,7 +37,7 @@ import java.util.stream.Stream;
 /**
  * The BlockManager will not add an Under Construction
  * block to the DatanodeDescriptor StorageInfos until
- * the block is fully committed & finalized.
+ * the block is fully committed and finalized.
  * The UC block replicas are instead tracked here
  * for the DatanodeAdminManager to use.
  * Note that this is tracked in-memory only, as such
@@ -131,6 +131,7 @@ public class UnderConstructionBlocks {
     }
     if (reportingNode == null || reportedBlock == null) {
       LOG.warn("Unexpected null input {} , {}", reportingNode, reportedBlock);
+      return;
     }
     try {
       Set<BlockReplica> replicas;
@@ -196,6 +197,7 @@ public class UnderConstructionBlocks {
     }
     if (reportingNode == null) {
       LOG.warn("Unexpected null input {}", reportingNode);
+      return;
     }
     try {
       Set<Block> toRemoveFromMap = new HashSet<>();
@@ -236,6 +238,7 @@ public class UnderConstructionBlocks {
     }
     if (reportingNode == null || reportedBlock == null) {
       LOG.warn("Unexpected null input {} , {}", reportingNode, reportedBlock);
+      return;
     }
     try {
       Set<BlockReplica> storedReplicasForBlock;

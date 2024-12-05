@@ -1234,6 +1234,27 @@
 </property>
 
 <property>
+  <name>dfs.namenode.decommission.track.underconstructionblocks</name>
+  <value>false</value>
+  <description>
+    A datanode should only enter decommissioned state if all blocks
+    on the datanode are sufficiently replicated to other live datanodes.
+
+    When this setting is disabled, the Namenode does not consider
+    Under Construction blocks in determining if a datanode can be
+    decommissioned; this results in scenarios where datanodes enter
+    decommissioned state before their blocks are sufficiently replicated
+    to other live datanodes. This can lead to HDFS write failures and
+    data loss, if all the datanodes in the block write pipeline are
+    decommissioned and terminated at around the same time.
+
+    Enable the following setting to have the Namenode track and consider
+    Under Construction blocks when identifying if a datanode can be
+    decommissioned.
+  </description>
+</property>
+
+<property>
   <name>dfs.namenode.redundancy.interval.seconds</name>
   <value>3</value>
   <description>The periodicity in seconds with which the namenode computes 

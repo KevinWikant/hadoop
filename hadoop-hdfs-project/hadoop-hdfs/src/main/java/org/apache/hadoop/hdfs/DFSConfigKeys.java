@@ -1752,11 +1752,11 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
    * Under Construction blocks in determining if a datanode can be
    * decommissioned; this results in scenarios where datanodes enter
    * decommissioned state before their blocks are sufficiently replicated
-   * to other live datanodes. This can lead to HDFS write failures & data loss,
-   * if all the datanodes in the block write pipeline are decommissioned
-   * & terminated at around the same time.
+   * to other live datanodes. This can lead to HDFS write failures and
+   * data loss, if all the datanodes in the block write pipeline are
+   * decommissioned and terminated at around the same time.
    *
-   * Enable the following setting to have the Namenode track & consider
+   * Enable the following setting to have the Namenode track and consider
    * Under Construction blocks when identifying if a datanode can be
    * decommissioned.
    */
