@@ -180,7 +180,8 @@ public class DatanodeAdminDefaultMonitor extends DatanodeAdminMonitorBase
           "decommissioning/maintenance checks.");
       return;
     }
-    blockManager.logWarningForLongUnderConstructionBlocks();
+    blockManager.getUnderConstructionBlocks()
+        .logWarningForLongUnderConstructionBlocks();
     // Reset the checked count at beginning of each iteration
     numBlocksChecked = 0;
     numBlocksCheckedPerLock = 0;
@@ -242,7 +243,8 @@ public class DatanodeAdminDefaultMonitor extends DatanodeAdminMonitorBase
     // Prepare a lookup map to determine if a datanode
     // has any blocks Under Construction.
     final Map<DatanodeDescriptor, List<Block>> ucBlocksByDatanode =
-        blockManager.countUnderConstructionBlocksByDatanode();
+        blockManager.getUnderConstructionBlocks()
+            .getUnderConstructionBlocksByDatanode();
     while (it.hasNext() && !exceededNumBlocksPerCheck() && namesystem
         .isRunning()) {
       numNodesChecked++;

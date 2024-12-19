@@ -1745,23 +1745,35 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
       DFS_DATANODE_LOCKMANAGER_TRACE_DEFAULT = false;
 
   /**
-   * A datanode should only enter decommissioned state if all blocks
-   * on the datanode are sufficiently replicated to other live datanodes.
+   * Determines whether the NameNode tracks under-construction blocks
+   * when decommissioning DataNodes.
    *
-   * When this setting is disabled, the Namenode does not consider
-   * Under Construction blocks in determining if a datanode can be
-   * decommissioned; this results in scenarios where datanodes enter
-   * decommissioned state before their blocks are sufficiently replicated
-   * to other live datanodes. This can lead to HDFS write failures and
-   * data loss, if all the datanodes in the block write pipeline are
-   * decommissioned and terminated at around the same time.
+   * A DataNode should only enter decommissioned state if all blocks on
+   * the DataNode are sufficiently replicated to other live DataNodes.
    *
-   * Enable the following setting to have the Namenode track and consider
-   * Under Construction blocks when identifying if a datanode can be
-   * decommissioned.
+   * When this setting is disabled, the NameNode does not consider
+   * under-construction blocks in determining if a DataNode can be
+   * decommissioned. This can result in scenarios where DataNodes
+   * enter decommissioned state before their blocks are sufficiently
+   * replicated to other live DataNodes.
+   *
+   * This situation can lead to HDFS write failures and data loss if
+   * all the DataNodes in the block write pipeline are decommissioned
+   * and terminated at around the same time.
+   *
+   * Enable this setting to have the NameNode track and consider
+   * under-construction blocks when identifying if a DataNode can
+   * be decommissioned.
    */
   public static final String DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS =
           "dfs.namenode.decommission.track.underconstructionblocks";
+  /**
+   * "dfs.namenode.decommission.track.underconstructionblocks" feature is
+   * disabled by default. Enabling this feature will benefit HDFS clusters
+   * with datanode decommissioning operations and HDFS blocks/files held
+   * open for extended periods of time. These HDFS clusters will see
+   * reduction in HDFS write failures & HDFS data loss.
+   */
   public static final boolean DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS_DEFAULT =
           false;
 

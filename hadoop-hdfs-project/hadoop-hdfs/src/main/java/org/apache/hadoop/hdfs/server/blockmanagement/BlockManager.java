@@ -211,12 +211,17 @@ public class BlockManager implements BlockStatsMXBean {
    * When an HDFS client notifies the Namenode a block is closed/committed,
    * the block is added to the StorageInfos and therefore needs to be
    * removed from UnderConstructionBlocks.
+   *
+   * @param dn - datanode storing the Under Construction block.
+   * @param block - Under Construction block to stop tracking for the datanode.
    */
   public void removeUcBlock(DatanodeDescriptor dn, Block block) {
     ucBlocks.removeUcBlock(dn, block);
   }
 
-  @VisibleForTesting
+  /**
+   * @return - the data structure for tracking Under Construction block replicas.
+   */
   public UnderConstructionBlocks getUnderConstructionBlocks() {
     return ucBlocks;
   }
@@ -1840,24 +1845,6 @@ public class BlockManager implements BlockStatsMXBean {
 
     node.resetBlocks();
     invalidateBlocks.remove(node);
-  }
-
-  /** Count how many Under Construction blocks there are per datanode. */
-  Map<DatanodeDescriptor, List<Block>> countUnderConstructionBlocksByDatanode() {
-    final Map<DatanodeDescriptor, List<Block>> result =
-        ucBlocks.getUnderConstructionBlocksByDatanode();
-    if (LOG.isDebugEnabled()) {
-      String ucBlockCounts = result.entrySet().stream()
-          .map(e -> String.format("%s=%d", e.getKey(), e.getValue().size()))
-          .collect(Collectors.joining(",", "{", "}"));
-      LOG.debug("Under Construction block counts: [{}]", ucBlockCounts);
-    }
-    return result;
-  }
-
-  /** Log warning for each block open for longer than fixed time threshold. */
-  void logWarningForLongUnderConstructionBlocks() {
-    ucBlocks.logWarningForLongUnderConstructionBlocks();
   }
 
   /** Remove the blocks associated to the given DatanodeStorageInfo. */
