@@ -1770,9 +1770,9 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
   /**
    * "dfs.namenode.decommission.track.underconstructionblocks" feature is
    * disabled by default. Enabling this feature will benefit HDFS clusters
-   * with datanode decommissioning operations and HDFS blocks/files held
+   * with datanode decommissioning operations and HDFS blocks held
    * open for extended periods of time. These HDFS clusters will see
-   * reduction in HDFS write failures & HDFS data loss.
+   * reduction in HDFS write failures and HDFS data loss.
    */
   public static final boolean DFS_DECOMMISSION_TRACK_UNDER_CONSTRUCTION_BLOCKS_DEFAULT =
           false;

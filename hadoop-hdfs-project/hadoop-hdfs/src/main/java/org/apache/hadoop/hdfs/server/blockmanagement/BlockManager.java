@@ -3731,16 +3731,16 @@ public class BlockManager implements BlockStatsMXBean {
     block.getUnderConstructionFeature().addReplicaIfNotPresent(
         storageInfo, ucBlock.reportedBlock, ucBlock.reportedState);
 
-    // Add replica if appropriate. If the replica was previously corrupt
-    // but now okay, it might need to be updated.
-    if (ucBlock.reportedState == ReplicaState.FINALIZED && (
-        block.findStorageInfo(storageInfo) < 0) || corruptReplicas
-        .isReplicaCorrupt(block, storageInfo.getDatanodeDescriptor())) {
-      addStoredBlock(block, ucBlock.reportedBlock, storageInfo, null, true);
-    } else {
+    if (ucBlock.reportedState == ReplicaState.RBW) {
       // Non-finalized Under Construction blocks are not added to the StorageInfos.
       // They are instead tracked via UnderConstructionBlocks data structure.
       ucBlocks.addUcBlock(storageInfo.getDatanodeDescriptor(), ucBlock.reportedBlock);
+    } else if (ucBlock.reportedState == ReplicaState.FINALIZED && (
+        block.findStorageInfo(storageInfo) < 0) || corruptReplicas
+        .isReplicaCorrupt(block, storageInfo.getDatanodeDescriptor())) {
+      // Add replica if appropriate. If the replica was previously corrupt
+      // but now okay, it might need to be updated.
+      addStoredBlock(block, ucBlock.reportedBlock, storageInfo, null, true);
     }
   } 
 
